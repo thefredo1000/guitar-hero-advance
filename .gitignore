@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Python virtual environments
+.venv/
+
+# Editor settings
+.vscode/
+
+# Build output
+build/
+*.o
+*.d
+*.elf
+*.gba
+
+# Save files
+*.sav
+
+# Local templates and generated assets
+template.sav
