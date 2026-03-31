@@ -3,7 +3,6 @@
 #include "bn_core.h"
 #include "bn_keypad.h"
 #include "bn_music.h"
-#include "bn_music_items.h"
 #include "bn_sprite_ptr.h"
 #include "bn_sprite_text_generator.h"
 #include "bn_string.h"
@@ -16,26 +15,10 @@
 
 #include "common_variable_8x16_sprite_font.h"
 
-#include "chart.h"
+#include "song_catalog.h"
 
 namespace
 {
-    const char* song_title(gha::song_type song)
-    {
-        switch (song)
-        {
-            case gha::song_type::HACKER:
-                return "Hacker";
-            case gha::song_type::BEAT_IT:
-                return "Beat It";
-            case gha::song_type::EVEN_FLOW:
-                return "Even Flow";
-            case gha::song_type::COOLIO:
-            default:
-                return "Gangsta's Paradise";
-        }
-    }
-
     constexpr int lane_x(int lane)
     {
         return (lane - (LANE_COUNT / 2)) * LANE_SPACING;
@@ -54,69 +37,9 @@ namespace
         }
     }
 
-    struct chart_view
+    constexpr int adjusted_hit_tick(const gha::song_catalog_entry& song_data, const ChartNote& note)
     {
-        const ChartNote* notes;
-        int size;
-        chart_timing timing;
-        int note_offset_ticks;
-    };
-
-    constexpr int song_sync_offset_ticks(gha::song_type song)
-    {
-        switch (song)
-        {
-            case gha::song_type::HACKER:
-                return 0;
-            case gha::song_type::EVEN_FLOW:
-                return 0;
-            case gha::song_type::BEAT_IT:
-                return 0;
-            case gha::song_type::COOLIO:
-            default:
-                return 0;
-        }
-    }
-
-    constexpr int adjusted_hit_tick(const chart_view& chart, const ChartNote& note)
-    {
-        return note.hit_tick + chart.note_offset_ticks;
-    }
-
-    chart_view chart_for_song(gha::song_type song)
-    {
-        switch (song)
-        {
-            case gha::song_type::HACKER:
-                return { HACKER_CHART, HACKER_CHART_SIZE, HACKER_TIMING, song_sync_offset_ticks(song) };
-            case gha::song_type::EVEN_FLOW:
-                return { EVEN_FLOW_CHART, EVEN_FLOW_CHART_SIZE, EVEN_FLOW_TIMING, song_sync_offset_ticks(song) };
-            case gha::song_type::BEAT_IT:
-                return { BEAT_IT_CHART, BEAT_IT_CHART_SIZE, BEAT_IT_TIMING, song_sync_offset_ticks(song) };
-            case gha::song_type::COOLIO:
-            default:
-                return { COOLIO_CHART, COOLIO_CHART_SIZE, COOLIO_TIMING, song_sync_offset_ticks(song) };
-        }
-    }
-
-    void play_song(gha::song_type song)
-    {
-        switch (song)
-        {
-            case gha::song_type::HACKER:
-                bn::music_items::hacker.play(1);
-                break;
-            case gha::song_type::EVEN_FLOW:
-                bn::music_items::evenflow.play(1);
-                break;
-            case gha::song_type::BEAT_IT:
-                bn::music_items::beat_it.play(1);
-                break;
-            case gha::song_type::COOLIO:
-            default:
-                bn::music_items::coolio.play(1);
-                break;
-        }
+        return note.hit_tick + song_data.note_offset_ticks;
     }
 
     struct active_note
@@ -162,12 +85,12 @@ namespace
         }
     }
 
-    void spawn_pending_notes(runtime& game, const chart_view& chart)
+    void spawn_pending_notes(runtime& game, const gha::song_catalog_entry& song_data)
     {
-        while (game.next_spawn_idx < chart.size)
+        while (game.next_spawn_idx < song_data.chart_size)
         {
-            const ChartNote& note = chart.notes[game.next_spawn_idx];
-            int spawn_tick = adjusted_hit_tick(chart, note) - TRAVEL_TICKS;
+            const ChartNote& note = song_data.chart[game.next_spawn_idx];
+            int spawn_tick = adjusted_hit_tick(song_data, note) - TRAVEL_TICKS;
 
             if (game.current_tick < spawn_tick)
             {
@@ -185,13 +108,13 @@ namespace
         }
     }
 
-    void update_notes(runtime& game, const chart_view& chart)
+    void update_notes(runtime& game, const gha::song_catalog_entry& song_data)
     {
         for (auto it = game.active_notes.begin(); it != game.active_notes.end(); )
         {
             active_note& note = *it;
-            const ChartNote& chart_note = chart.notes[note.chart_index];
-            int chart_hit_tick = adjusted_hit_tick(chart, chart_note);
+            const ChartNote& chart_note = song_data.chart[note.chart_index];
+            int chart_hit_tick = adjusted_hit_tick(song_data, chart_note);
 
             note.sprite.set_y(note.sprite.y() + 1);
 
@@ -212,7 +135,7 @@ namespace
         }
     }
 
-    HitResult try_hit_lane(runtime& game, const chart_view& chart, int lane)
+    HitResult try_hit_lane(runtime& game, const gha::song_catalog_entry& song_data, int lane)
     {
         auto best_it = game.active_notes.end();
         int best_dist = HIT_WINDOW_GOOD + 1;
@@ -225,13 +148,13 @@ namespace
                 continue;
             }
 
-            const ChartNote& chart_note = chart.notes[note.chart_index];
+            const ChartNote& chart_note = song_data.chart[note.chart_index];
             if (chart_note.lane != lane)
             {
                 continue;
             }
 
-            int dist = game.current_tick - adjusted_hit_tick(chart, chart_note);
+            int dist = game.current_tick - adjusted_hit_tick(song_data, chart_note);
             if (dist < -HIT_WINDOW_GOOD)
             {
                 continue;
@@ -254,7 +177,7 @@ namespace
         return best_dist <= HIT_WINDOW_PERFECT ? HitResult::PERFECT : HitResult::GOOD;
     }
 
-    void process_input(runtime& game, const chart_view& chart, bn::sprite_text_generator& text_generator)
+    void process_input(runtime& game, const gha::song_catalog_entry& song_data, bn::sprite_text_generator& text_generator)
     {
         for (int lane = 0; lane < LANE_COUNT; ++lane)
         {
@@ -264,7 +187,7 @@ namespace
             }
 
             game.halo_flash[lane] = 6;
-            HitResult hit = try_hit_lane(game, chart, lane);
+            HitResult hit = try_hit_lane(game, song_data, lane);
 
             if (hit == HitResult::PERFECT)
             {
@@ -342,9 +265,9 @@ namespace gha
     scene_type gameplay_screen(song_type song)
     {
         runtime game;
-        chart_view chart = chart_for_song(song);
-        const int music_start_tick = chart.timing.lead_in;
-        const int countdown_start_tick = music_start_tick - chart.timing.pre_song_ticks;
+        const song_catalog_entry& song_data = song_catalog_entry_for(song);
+        const int music_start_tick = song_data.timing.lead_in;
+        const int countdown_start_tick = music_start_tick - song_data.timing.pre_song_ticks;
         bool music_started = false;
         int last_countdown_number = -1;
 
@@ -352,7 +275,7 @@ namespace gha
         text_generator.set_left_alignment();
 
         bn::vector<bn::sprite_ptr, 32> top_text_sprites;
-        text_generator.generate(-112, 72, song_title(song), top_text_sprites);
+        text_generator.generate(-112, 72, song_data.title, top_text_sprites);
 
         bn::vector<bn::sprite_ptr, 16> countdown_sprites;
 
@@ -363,7 +286,7 @@ namespace gha
         {
             if (!music_started && game.current_tick >= music_start_tick)
             {
-                play_song(song);
+                song_data.music.play(1);
                 music_started = true;
                 countdown_sprites.clear();
             }
@@ -374,10 +297,10 @@ namespace gha
                 {
                     game.last_music_position = bn::music::position();
                 }
-                else if (song == song_type::EVEN_FLOW || song == song_type::HACKER)
+                else if (song_data.restart_on_drop)
                 {
                     // Maxmod can occasionally drop this imported module; resume near last known position.
-                    play_song(song);
+                    song_data.music.play(1);
 
                     if (game.last_music_position > 0)
                     {
@@ -389,7 +312,7 @@ namespace gha
             if (!music_started && game.current_tick >= countdown_start_tick)
             {
                 int countdown_elapsed_ticks = game.current_tick - countdown_start_tick;
-                int beat_index = countdown_elapsed_ticks / chart.timing.frames_per_beat;
+                int beat_index = countdown_elapsed_ticks / song_data.timing.frames_per_beat;
                 int countdown_number = COUNTDOWN_BEATS - beat_index;
 
                 if (countdown_number != last_countdown_number && countdown_number >= 1)
@@ -404,9 +327,9 @@ namespace gha
                 }
             }
 
-            spawn_pending_notes(game, chart);
-            process_input(game, chart, text_generator);
-            update_notes(game, chart);
+            spawn_pending_notes(game, song_data);
+            process_input(game, song_data, text_generator);
+            update_notes(game, song_data);
             update_halos(game);
             update_hud(game, text_generator);
 

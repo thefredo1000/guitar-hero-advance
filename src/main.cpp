@@ -11,7 +11,7 @@ int main()
     bn::core::init();
 
     gha::scene_type scene = gha::scene_type::TITLE;
-    gha::song_type selected_song = gha::song_type::COOLIO;
+    gha::song_type selected_song = gha::song_type::EVEN_FLOW;
 
     while (true)
     {

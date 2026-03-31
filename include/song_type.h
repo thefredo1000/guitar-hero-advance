@@ -5,8 +5,6 @@ namespace gha
 {
     enum class song_type
     {
-        COOLIO,
-        BEAT_IT,
         EVEN_FLOW,
         HACKER
     };
