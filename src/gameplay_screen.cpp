@@ -1,17 +1,23 @@
 #include "gameplay_screen.h"
 
 #include "bn_core.h"
+#include "bn_display.h"
 #include "bn_keypad.h"
 #include "bn_music.h"
 #include "bn_sprite_ptr.h"
 #include "bn_sprite_text_generator.h"
+#include "bn_unique_ptr.h"
 #include "bn_string.h"
 #include "bn_sstream.h"
 #include "bn_utility.h"
 #include "bn_vector.h"
 
+#include "bn_array.h"
+
 #include "bn_sprite_items_halos.h"
-#include "bn_sprite_items_notes.h"
+
+#include "polygon.h"
+#include "polygon_sprite.h"
 
 #include "common_variable_8x16_sprite_font.h"
 
@@ -19,9 +25,68 @@
 
 namespace
 {
+    constexpr bn::fixed FAR_Y = -58;
+    // Align hit-time projection with the halo row so visual and input timing match.
+    constexpr bn::fixed NEAR_Y = HALO_Y;
+    constexpr bn::fixed FAR_LANE_SPACING = 6;
+    constexpr bn::fixed FAR_NOTE_HALF_WIDTH = 2;
+    constexpr bn::fixed NEAR_NOTE_HALF_WIDTH = 7;
+    constexpr bn::fixed FAR_NOTE_HALF_HEIGHT = FAR_NOTE_HALF_WIDTH;
+    constexpr bn::fixed NEAR_NOTE_HALF_HEIGHT = NEAR_NOTE_HALF_WIDTH;
+    constexpr int FEEDBACK_Y = -56;
+
+    constexpr bn::fixed lane_mid_index = (LANE_COUNT - 1) / 2;
+
     constexpr int lane_x(int lane)
     {
         return (lane - (LANE_COUNT / 2)) * LANE_SPACING;
+    }
+
+    constexpr bn::fixed clamp_progress(bn::fixed progress)
+    {
+        if (progress < 0)
+        {
+            return 0;
+        }
+
+        if (progress > 1)
+        {
+            return 1;
+        }
+
+        return progress;
+    }
+
+    constexpr bn::fixed lerp(bn::fixed a, bn::fixed b, bn::fixed progress)
+    {
+        return a + (b - a) * progress;
+    }
+
+    constexpr bn::fixed lane_center_x(bn::fixed lane, bn::fixed progress)
+    {
+        bn::fixed spacing = lerp(FAR_LANE_SPACING, bn::fixed(LANE_SPACING), progress);
+        return (lane - lane_mid_index) * spacing;
+    }
+
+    constexpr bn::fixed projected_y(bn::fixed progress)
+    {
+        return lerp(FAR_Y, NEAR_Y, progress);
+    }
+
+    constexpr int screen_x(bn::fixed world_x)
+    {
+        return world_x.right_shift_integer() + (bn::display::width() / 2);
+    }
+
+    constexpr int screen_y(bn::fixed world_y)
+    {
+        return world_y.right_shift_integer() + (bn::display::height() / 2);
+    }
+
+    constexpr bn::fixed note_progress(int current_tick, int chart_hit_tick)
+    {
+        int ticks_since_spawn = current_tick - (chart_hit_tick - TRAVEL_TICKS);
+        return bn::fixed(ticks_since_spawn) / TRAVEL_TICKS;
     }
 
     bool lane_just_pressed(int lane)
@@ -44,12 +109,14 @@ namespace
 
     struct active_note
     {
-        bn::sprite_ptr sprite;
+        bn::unique_ptr<polygon> poly;
         int chart_index;
         bool missed;
 
-        active_note(bn::sprite_ptr sprite_param, int chart_index_param)
-            : sprite(bn::move(sprite_param)), chart_index(chart_index_param), missed(false)
+                active_note(bn::unique_ptr<polygon> poly_param, int chart_index_param)
+            : poly(bn::move(poly_param)),
+              chart_index(chart_index_param),
+              missed(false)
         {
         }
     };
@@ -63,6 +130,8 @@ namespace
         int last_music_position = 0;
 
         bn::vector<bn::sprite_ptr, LANE_COUNT> halo_sprites;
+        bn::vector<const polygon*, MAX_ACTIVE_NOTES> note_polygon_refs;
+        bn::unique_ptr<polygon_sprite> note_polygon_sprite;
         bn::vector<active_note, MAX_ACTIVE_NOTES> active_notes;
 
         int halo_flash[LANE_COUNT] = {};
@@ -76,6 +145,41 @@ namespace
         int feedback_timer = 0;
     };
 
+    bn::array<bn::fixed_point, 4> build_quad(int x0, int y0, int x1, int y1)
+    {
+        return {
+            bn::fixed_point(x0, y0),
+            bn::fixed_point(x1, y0),
+            bn::fixed_point(x1, y1),
+            bn::fixed_point(x0, y1)
+        };
+    }
+
+    bn::array<bn::fixed_point, 4> build_note_quad(int lane, bn::fixed progress)
+    {
+        bn::fixed clamped = clamp_progress(progress);
+        bn::fixed center_x = lane_center_x(lane, clamped);
+        bn::fixed center_y = projected_y(clamped);
+        bn::fixed half_width = lerp(FAR_NOTE_HALF_WIDTH, NEAR_NOTE_HALF_WIDTH, clamped);
+        bn::fixed half_height = lerp(FAR_NOTE_HALF_HEIGHT, NEAR_NOTE_HALF_HEIGHT, clamped);
+
+        int left = screen_x(center_x - half_width);
+        int right = screen_x(center_x + half_width);
+        int top = screen_y(center_y - half_height);
+        int bottom = screen_y(center_y + half_height);
+        return build_quad(left, top, right, bottom);
+    }
+
+    void set_polygon_vertices(polygon& poly, const bn::array<bn::fixed_point, 4>& vertices)
+    {
+        bn::ivector<bn::fixed_point>& poly_vertices = poly.vertices();
+
+        for (int i = 0; i < 4; ++i)
+        {
+            poly_vertices[i] = vertices[i];
+        }
+    }
+
     void init_halos(runtime& game)
     {
         for (int i = 0; i < LANE_COUNT; ++i)
@@ -83,6 +187,13 @@ namespace
             game.halo_sprites.push_back(
                 bn::sprite_items::halos.create_sprite(lane_x(i), HALO_Y, i));
         }
+    }
+
+    void init_track(runtime& game)
+    {
+        bn::span<const polygon*> empty_polygons;
+        game.note_polygon_sprite.reset(new polygon_sprite(empty_polygons, 0, 0));
+        game.note_polygon_sprite->update();
     }
 
     void spawn_pending_notes(runtime& game, const gha::song_catalog_entry& song_data)
@@ -99,9 +210,9 @@ namespace
 
             if (!game.active_notes.full())
             {
-                game.active_notes.emplace_back(
-                    bn::sprite_items::notes.create_sprite(lane_x(note.lane), SPAWN_Y, note.lane),
-                    game.next_spawn_idx);
+                bn::array<bn::fixed_point, 4> note_vertices = build_note_quad(note.lane, 0);
+                bn::unique_ptr<polygon> note_poly(new polygon(note_vertices));
+                game.active_notes.emplace_back(bn::move(note_poly), game.next_spawn_idx);
             }
 
             ++game.next_spawn_idx;
@@ -110,13 +221,15 @@ namespace
 
     void update_notes(runtime& game, const gha::song_catalog_entry& song_data)
     {
+        game.note_polygon_refs.clear();
+
         for (auto it = game.active_notes.begin(); it != game.active_notes.end(); )
         {
             active_note& note = *it;
             const ChartNote& chart_note = song_data.chart[note.chart_index];
             int chart_hit_tick = adjusted_hit_tick(song_data, chart_note);
-
-            note.sprite.set_y(note.sprite.y() + 1);
+            bn::fixed progress = note_progress(game.current_tick, chart_hit_tick);
+            set_polygon_vertices(*note.poly, build_note_quad(chart_note.lane, progress));
 
             if (!note.missed && game.current_tick > chart_hit_tick + HIT_WINDOW_GOOD)
             {
@@ -124,15 +237,20 @@ namespace
                 game.combo = 0;
             }
 
-            if (note.sprite.y() > bn::fixed(DESPAWN_Y))
+            if (projected_y(progress) > bn::fixed(DESPAWN_Y + 8))
             {
                 it = game.active_notes.erase(it);
             }
             else
             {
+                game.note_polygon_refs.push_back(note.poly.get());
                 ++it;
             }
         }
+
+        bn::span<const polygon*> note_polygons(game.note_polygon_refs.data(), game.note_polygon_refs.size());
+        game.note_polygon_sprite->set_polygons(note_polygons);
+        game.note_polygon_sprite->update();
     }
 
     HitResult try_hit_lane(runtime& game, const gha::song_catalog_entry& song_data, int lane)
@@ -195,7 +313,7 @@ namespace
                 game.score += SCORE_PERFECT * (1 + game.combo / 10);
 
                 game.feedback_sprites.clear();
-                text_generator.generate(0, 20, "PERFECT!", game.feedback_sprites);
+                text_generator.generate(0, FEEDBACK_Y, "PERFECT!", game.feedback_sprites);
                 game.feedback_timer = 40;
             }
             else if (hit == HitResult::GOOD)
@@ -204,7 +322,7 @@ namespace
                 game.score += SCORE_GOOD * (1 + game.combo / 10);
 
                 game.feedback_sprites.clear();
-                text_generator.generate(0, 20, "GOOD", game.feedback_sprites);
+                text_generator.generate(0, FEEDBACK_Y, "GOOD", game.feedback_sprites);
                 game.feedback_timer = 30;
             }
         }
@@ -280,6 +398,7 @@ namespace gha
         bn::vector<bn::sprite_ptr, 16> countdown_sprites;
 
         init_halos(game);
+        init_track(game);
         update_hud(game, text_generator);
 
         while (!bn::keypad::start_pressed())
