@@ -8,9 +8,13 @@
 constexpr int FRAMES_PER_SECOND = 60;
 
 // Butano (0,0) = screen centre. Screen spans y in [-80, 80].
-constexpr int SPAWN_Y   = -80;   // note spawns above the top edge
-constexpr int HALO_Y    =  56;   // hit-zone / halo row
+constexpr int VANISH_Y  = -80;   // perspective vanishing-point row (top of screen)
+constexpr int SPAWN_Y   = -80;   // note spawns at the vanishing point
+constexpr int HALO_Y    =  56;   // hit-zone / halo row (full scale / full lane spread)
 constexpr int DESPAWN_Y =  82;   // note disappears just below the bottom edge
+
+// Perspective travel denominator: distance from vanishing point to hit zone.
+constexpr int PERSPECTIVE_TRAVEL = HALO_Y - VANISH_Y;  // 136
 
 // Note speed: 1 pixel per frame.
 // Travel distance = HALO_Y - SPAWN_Y = 136 pixels → 136 frames.

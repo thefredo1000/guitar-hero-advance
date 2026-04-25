@@ -29,7 +29,7 @@ namespace
         switch (lane)
         {
             case 0: return bn::keypad::left_pressed();
-            case 1: return bn::keypad::down_pressed();
+            case 1: return bn::keypad::up_pressed();
             case 2: return bn::keypad::right_pressed();
             case 3: return bn::keypad::b_pressed();
             case 4: return bn::keypad::a_pressed();
@@ -100,13 +100,20 @@ namespace
             if (!game.active_notes.full())
             {
                 game.active_notes.emplace_back(
-                    bn::sprite_items::notes.create_sprite(lane_x(note.lane), SPAWN_Y, note.lane),
+                    bn::sprite_items::notes.create_sprite(bn::fixed(lane_x(note.lane)) * bn::fixed(0.4), SPAWN_Y, note.lane),
                     game.next_spawn_idx);
             }
 
             ++game.next_spawn_idx;
         }
     }
+
+    // Scale values used for the 4 discrete perspective steps.
+    // Using only 4 distinct values means at most 4 OAM affine-matrix slots are
+    // consumed by notes at any one time, well within the GBA's 32-slot budget.
+    constexpr bn::fixed NOTE_SCALE_TABLE[4] = {
+        bn::fixed(0.3), bn::fixed(0.55), bn::fixed(0.8), bn::fixed(1)
+    };
 
     void update_notes(runtime& game, const gha::song_catalog_entry& song_data)
     {
@@ -117,6 +124,26 @@ namespace
             int chart_hit_tick = adjusted_hit_tick(song_data, chart_note);
 
             note.sprite.set_y(note.sprite.y() + 1);
+
+            // --- 3D perspective (trapezoid) ---
+            // t = 0  at VANISH_Y (top): narrow spread, small scale
+            // t = 1  at HALO_Y   (hit zone): full spread, full scale
+            bn::fixed t = (note.sprite.y() - bn::fixed(VANISH_Y)) / PERSPECTIVE_TRAVEL;
+            if (t < 0) t = bn::fixed(0);
+            if (t > 1) t = bn::fixed(1);
+
+            // X: interpolate from SPREAD_MIN_FACTOR (narrow) to 1.0 (full lane spacing)
+            // e.g. at the top lanes are 40% of their final distance apart
+            constexpr bn::fixed SPREAD_MIN = bn::fixed(0.4);
+            bn::fixed x_factor = SPREAD_MIN + (bn::fixed(1) - SPREAD_MIN) * t;
+            note.sprite.set_x(bn::fixed(lane_x(chart_note.lane)) * x_factor);
+
+            // Scale: 4 discrete levels to share OAM affine matrix slots
+            int scale_idx = (t * 4).floor_integer();
+            if (scale_idx < 0) scale_idx = 0;
+            if (scale_idx > 3) scale_idx = 3;
+            note.sprite.set_scale(NOTE_SCALE_TABLE[scale_idx]);
+            // --- end perspective ---
 
             if (!note.missed && game.current_tick > chart_hit_tick + HIT_WINDOW_GOOD)
             {
